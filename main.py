@@ -228,6 +228,7 @@ if __name__ == "__main__":
     options = read_options_file()
     parser = setup_parser()
 
+    print("OPTIONS: " + str(options))
     # Only get arg keys with specified values
     args = parser.parse_args()
 

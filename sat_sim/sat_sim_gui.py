@@ -11,314 +11,35 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_pdf import PdfPages
-from PyQt5.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QCheckBox, QWidget, QLabel, QLineEdit, QMessageBox, QFileDialog, QSlider, QSizePolicy, QHBoxLayout, QFrame, QGraphicsOpacityEffect, QScrollArea
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRect, QPropertyAnimation, QEasingCurve, QSize
-
+from PyQt5.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel, QLineEdit, QMessageBox, QFileDialog, QSlider, QSizePolicy, QHBoxLayout
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QRect
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import vtk
-
 import networkx as nx
 from datetime import datetime, timedelta, timezone
 from skyfield.api import load
 
-class DropLabel(QLabel):
-    fileDropped = pyqtSignal(str)  # Emits TLE content string
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setAlignment(Qt.AlignCenter)
-        self.setText("Drop\nHere")
-        self.setFixedSize(100, 100)
-        self.setStyleSheet("""
-            border: 2px dashed #888;
-            border-radius: 6px;
-            background-color: #f8f8f8;
-        """)
+class WorkerThread(QThread):
+    #A worker thread that periodically updates satellite positions.
+    update_signal = pyqtSignal(object)
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-            self.setStyleSheet("""
-                QLabel {
-                    border: 2px dashed #00aaff;
-                    background-color: #e0f7ff;
-                    padding: 20px;
-                    font-size: 14px;
-                }
-            """)
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        self.resetStyle()
-        for url in event.mimeData().urls():
-            file_path = url.toLocalFile()
-            if file_path.endswith(".txt") or file_path.endswith(".tle"):
-                with open(file_path, "r") as file:
-                    self.fileDropped.emit(file_path)
-                break
-
-    def dragLeaveEvent(self, event):
-        self.resetStyle()
-
-    def resetStyle(self):
-        self.setStyleSheet("""
-            border: 2px dashed #888;
-            border-radius: 6px;
-            background-color: #f8f8f8;
-        """)
-
-class CollapsibleOverlay(QFrame):
-    resizeSignal = pyqtSignal(int)  # Emits new height
-
-    def __init__(self, parent=None):
-        
-        self.full_height = 150  # Total height when expanded
-        self.collapsed_height = 20
-
-        super().__init__(parent)
-        self.setStyleSheet("background-color: #f0f0f0; border: 1px solid gray;")
-        self.setParent(parent)
-        self.setGeometry(0, 0, parent.width(), self.collapsed_height)  # Start with just the button height
-        self.setVisible(True)
-
-        self.content_widget = QWidget(self)
-        self.content_widget.setGeometry(0, self.collapsed_height, parent.width(), self.full_height - self.collapsed_height)
-        self.content_widget.setStyleSheet("background-color: #dddddd;")
-        self.content_widget.setVisible(False)
-
-        # Use a horizontal layout
-        self.content_layout = QHBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(10, 10, 10, 10)
-        self.content_layout.setSpacing(15)
-
-        # Add DropLabel on the left
-        self.drop_label = DropLabel(self)
-        self.content_layout.addWidget(self.drop_label)
-
-        # Add your existing content on the right
-        self.right_content = QLabel("Collapsible content goes here.")
-        self.right_content.setWordWrap(True)
-        self.content_layout.addWidget(self.right_content)
-        
-        self.toggle_button = QPushButton("▼ Expand", self)
-        self.toggle_button.setGeometry(0, 0, parent.width(), self.collapsed_height)
-        self.toggle_button.clicked.connect(self.toggle)
-
-        # Add opacity effect
-        self.opacity_effect = QGraphicsOpacityEffect(self.toggle_button)
-        self.toggle_button.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(1.0)
-
-        # Set up enter/leave events
-        self.toggle_button.installEventFilter(self)
-
-        #AddAnimation when opening or closing widget
-        self.animation = QPropertyAnimation(self, b"geometry")
-        self.animation.setDuration(300)
-        self.animation.setEasingCurve(QEasingCurve.InOutCubic)
-        self.expanded = False
-        
-    def toggle(self):
-        self.expanded = not self.expanded
-        start_rect = self.geometry()
-        end_height = self.full_height if self.expanded else self.collapsed_height
-        end_rect = QRect(0, 0, self.parent().width(), end_height)
-
-        self.toggle_button.setText("▲ Collapse" if self.expanded else "▼ Expand")
-
-        self.resizeSignal.emit(end_height)
-
-        if self.expanded:
-            self.content_widget.setVisible(True)
-
-        self.animation.stop()
-        self.animation.setStartValue(start_rect)
-        self.animation.setEndValue(end_rect)
-        self.animation.start()        
-
-        if not self.expanded:
-            self.animation.finished.connect(self.hide_content)
-        else:
-            # Disconnect previous connection to avoid multiple calls
-            try:
-                self.animation.finished.disconnect(self.hide_content)
-            except TypeError:
-                pass
-
-        if self.expanded:
-            self.set_button_opacity(1.0)
-        else:
-            self.set_button_opacity(0.5)
-
-    def hide_content(self):
-        self.content_widget.setVisible(False)
-
-    def set_button_opacity(self, opacity):
-        self.opacity_effect.setOpacity(opacity)
-
-    def update_size(self):
-        new_width = self.parent().width()
-        new_height = self.height()
-        self.setGeometry(0, 0, new_width, new_height)
-        self.toggle_button.setGeometry(0, 0, new_width, 20)
-        self.content_widget.setGeometry(0, 20, new_width, self.full_height - self.collapsed_height)
-
-    def eventFilter(self, source, event):
-        if source == self.toggle_button:
-            if event.type() == event.Enter:
-                self.set_button_opacity(1.0)
-            elif event.type() == event.Leave and not self.expanded:
-                self.set_button_opacity(0.5)
-        return super().eventFilter(source, event)
-
-#------------------------------------------------------------------------------------------------------------------------------
-
-class TLEDisplay(QFrame):
-    def __init__(self, parent=None):
-        self.full_width = 300  # Total width when expanded
-        self.collapsed_width = 20
-        self.control_panel_height_reduction = 92 #TODO: find a better way to access this infomration
-        self.expanded = True
-
-        self.overlay = parent.overlay
-        self.parent = parent
-        super().__init__(parent)
-        self.setStyleSheet("background-color: #f0f0f0; border: 1px solid gray;")
-        self.setParent(parent)
-        self.setVisible(True)
-
-        self.set_up_content_window()
-        self.set_up_collapse_Button()
-
-        self.set_up_scroll_box()
-        
-        self.toggle_height(self.overlay.height())
-        self.overlay.resizeSignal.connect(self.toggle_height)
-
-    def set_up_collapse_Button(self):
-        self.toggle_button = QPushButton("▼ Expand", self)
-        self.toggle_button.setGeometry(0, 0, 20, self.height())
-
-        self.opacity_effect = QGraphicsOpacityEffect(self.toggle_button)
-        self.toggle_button.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(1.0)
-
-        # Set up enter/leave events
-        self.toggle_button.installEventFilter(self)
-
-        self.toggle_button.clicked.connect(self.toggle_width)
-
-    def set_up_content_window(self):
-        self.content_window = QWidget(self)
-        self.content_window.setGeometry(0, 0, self.full_width, self.parent.height() - self.overlay.height() - self.control_panel_height_reduction)
-        self.content_window.setStyleSheet("background-color: #dddddd;")
-        self.content_window.setVisible(True)
-
-    def set_up_scroll_box(self):
-    # Use a vertical layout
-        main_layout = QVBoxLayout(self.content_window)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-
-        inner_widget = QWidget()
-        self.inner_layout = QVBoxLayout(inner_widget)
-        
-        scroll_area.setWidget(inner_widget)
-        main_layout.addWidget(scroll_area)
-
-    def populate_scroll_items(self, tle_data):
-        #clear all existing items
-        #TODO: update existing items, then Add/Clear additional items as needed.
-        for i in reversed(range(self.inner_layout.count())):
-            widget_to_remove = self.inner_layout.itemAt(i).widget()
-
-            self.inner_layout.removeWidget(widget_to_remove)
-
-            widget_to_remove.setParent(None)
-
-        for i in tle_data:
-            name = str(i)
-            line_1 = tle_data[str(i)][0]
-            line_2 = tle_data[str(i)][1]
-            print("name: " + str(name) + ", line 1: " + str(line_1) + ", line 2: " + str(line_2))
-
-            self.inner_layout.addWidget(TLESlot(name, line_1, line_2))
-
-    def toggle_width(self):
-        self.expanded = not self.expanded
-
-        #start_rect = self.geometry()
-        end_width = self.full_width if self.expanded else self.collapsed_width
-        #end_rect = QRect(0, 0, self.parent().width(), end_height)
-        self.setGeometry(0, 20, end_width, self.height())  # Start with just the button height
-
-        self.content_window.setVisible(self.expanded)
-        self.toggle_button.setText("▲ Collapse" if self.expanded else "▼ Expand")
-        
-    def toggle_height(self, height_offset):
-        
-        target_height = self.parent.height() - height_offset - self.control_panel_height_reduction
-
-        self.setGeometry(0, height_offset, self.full_width, target_height)  # Start with just the button height
-        self.toggle_button.setGeometry(0, 0, 20, target_height)
-
-class TLESlot(QWidget):
-    def __init__(self, name, line_1, line_2):
-        self.enabled = True
-
-        self.tle_name = name
-        self.tle_line_1 = line_1
-        self.tle_line_2 = line_2
-
+    def __init__(self, simulation_instance, time):
         super().__init__()
-        self.setMinimumHeight(150)
+        self.simulation = simulation_instance
+        self.time = time
+        self.running = True
+        self.timestep_ms = self.simulation.timestep.total_seconds() * 1000
 
-        self.layout = QHBoxLayout(self)
-        
-        self.set_up_display_layer()
+    def run(self):
+        while self.running:
+            start_time = datetime.now()
+            positions = self.simulation.get_satellite_positions(self.time)
+            self.update_signal.emit(positions)
+            while self.running and (datetime.now() - start_time).total_seconds() * 1000 < self.timestep_ms:
+                self.msleep(100)
 
-    def set_up_display_layer(self):
-        #checkbox
-        self.checkbox = QCheckBox("")
-        self.checkbox.setToolTip("Enable" if self.enabled else "Disable")
-
-        indicator_size = 15 # Default checkbox indicator size in most styles
-        self.checkbox.setFixedSize(QSize(indicator_size, indicator_size))
-        
-        # Optional: Remove padding/margin (works in many styles)
-        self.checkbox.setStyleSheet("QCheckBox::indicator { margin: 0px; }")
-
-        self.checkbox.stateChanged.connect(self.checkbox_changed)
-
-        self.layout.addWidget(self.checkbox)
-
-        #label
-        item = QLabel(self.tle_name)
-        self.layout.addWidget(item)
-
-        #text
-        self.toggle_button = QPushButton("▼" if self.enabled else "▲", self)
-        self.toggle_button.setGeometry(0, 0, 20, 20)
-        self.toggle_button.clicked.connect(self.toggle)
-        self.layout.addWidget(self.toggle_button)
-
-    def checkbox_changed(self, state):
-        if state == 2:  # 2 = Checked, 0 = Unchecked, 1 = Partially checked
-            self.enabled = True
-        else:
-            self.enabled = False
-
-        self.checkbox.setToolTip("Enable" if self.enabled else "Disable")
-
-    def toggle(self):
-        self.toggle_button = QPushButton("▼" if self.enabled else "▲", self)
-
-#------------------------------------------------------------------------------------------------------------------------------
+    def stop(self):
+        self.running = False
 
 class SatSimGUI(QMainWindow):
     #The main GUI class for the Satellite Simulator.
@@ -329,26 +50,6 @@ class SatSimGUI(QMainWindow):
         # Prevent multiple instances of the GUI
         if SatSimGUI.gui_initialized:
             return
-        
-        self.set_up_satellite_simulation(sat_sim_instance)
-
-        self.set_up_main_window()
-        
-        self.set_up_display_panel()
-
-        self.set_up_dropdown()
-
-        self.set_up_control_panel()
-
-        self.set_up_tle_display()
-
-        self.populate_tle_display()
-
-        # Mark the GUI as initialized
-        SatSimGUI.gui_initialized = True
-
-    #region - UI set up
-    def set_up_satellite_simulation(self, sat_sim_instance):
         self.simulation = sat_sim_instance
         
         # Convert Skyfield Time objects to datetime if necessary
@@ -356,31 +57,40 @@ class SatSimGUI(QMainWindow):
         self.end_time = self.simulation.end_time.utc_datetime() if hasattr(self.simulation.end_time, 'utc_datetime') else self.simulation.end_time
         self.timestep = self.simulation.timestep
 
-    def set_up_main_window(self):
+        # Load TLE data if not already loaded
+        if self.simulation.tle_data is None and self.simulation.tle_file:
+            tle_data = self.simulation.read_tle_file(self.simulation.tle_file)
+            self.simulation.set_tle_data(tle_data)
+
+        # Set up the main window
         self.setWindowTitle('Satellite Visualization Over Time')
         screen_resolution = self.screen().size()
         window_width = min(1200, screen_resolution.width())
         window_height = min(900, screen_resolution.height())
         self.setGeometry(QRect(100, 100, window_width, window_height))
 
+        # Set up the central widget and layout
         self.centralWidget = QWidget(self)
         self.setCentralWidget(self.centralWidget)
+        self.layout = QVBoxLayout(self.centralWidget)
+        self.centralWidget.setLayout(self.layout)
 
-    def set_up_dropdown(self):
-        self.overlay = CollapsibleOverlay(self)
-        self.overlay.raise_()  # Ensure it's always on top
+        # Initialize the UI components
+        self.initUI()
 
-        #set up event listener
-        self.overlay.drop_label.fileDropped.connect(self.on_file_dropped)
+        # Start the worker thread for updating positions
+        self.worker = WorkerThread(self.simulation, self.start_time)
+        self.worker.update_signal.connect(self.on_update_positions)
+        self.worker.start()
 
-    def set_up_display_panel(self):
-        self.main_layout = QVBoxLayout(self.centralWidget)
-        self.centralWidget.setLayout(self.main_layout)
+        # Mark the GUI as initialized
+        SatSimGUI.gui_initialized = True
+
+    def initUI(self):
+        #Initialize the UI components.
         
-        self.set_up_visualiser()
 
-
-    def set_up_visualiser(self):
+        # VTK widget for 3D visualization
         self.vtkWidget = QVTKRenderWindowInteractor(self.centralWidget)
         self.vtkWidget.Initialize()
         self.vtkWidget.Start()
@@ -389,78 +99,73 @@ class SatSimGUI(QMainWindow):
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
         self.renderer.SetBackground(0.1, 0.2, 0.4)
         self.vtkWidget.setMinimumHeight(400)
-        self.main_layout.addWidget(self.vtkWidget, stretch=10)
+        self.layout.addWidget(self.vtkWidget, stretch=10)
 
-    def set_up_control_panel(self):
-        self.control_panel = QHBoxLayout()
+        # Layout for graphs and controls
+        self.graphLayout = QHBoxLayout()
+        self.layout.addLayout(self.graphLayout, stretch=5)
 
+        # Matplotlib figure and canvas for adjacency matrix and network graph
+        self.figure, self.axes = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.graphLayout.addWidget(self.canvas, stretch=10)
+
+        # Controls layout
+        self.controlsLayout = QVBoxLayout()
+        self.graphLayout.addLayout(self.controlsLayout, stretch=2)
+
+        # Labels for positions and distances
+        self.position_label = QLabel("Current Positions:")
+        self.position_label.setWordWrap(True)
+        self.controlsLayout.addWidget(self.position_label)
+
+        self.distance_label = QLabel("Distance Calculations:")
+        self.distance_label.setWordWrap(True)
+        self.controlsLayout.addWidget(self.distance_label)
+
+        # Input fields for start time, end time, and timestep
         self.start_time_input = QLineEdit(self.start_time.strftime("%Y-%m-%d %H:%M:%S"))
-        self.control_panel.addWidget(self.start_time_input)
+        self.controlsLayout.addWidget(self.start_time_input)
 
-        slider_widget = QVBoxLayout()
+        self.end_time_input = QLineEdit(self.end_time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.controlsLayout.addWidget(self.end_time_input)
 
         self.timeframe_input = QLineEdit(str(self.timestep // timedelta(minutes=1)))
-        slider_widget.addWidget(self.timeframe_input)
+        self.controlsLayout.addWidget(self.timeframe_input)
 
+        # Slider for time navigation
         self.time_slider = QSlider(Qt.Horizontal)
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(int((self.end_time - self.start_time) / self.timestep))
         self.time_slider.valueChanged.connect(self.on_slider_change)
-        slider_widget.addWidget(self.time_slider)
+        self.controlsLayout.addWidget(self.time_slider)
 
+        # Buttons for updating orbit and saving data
         btn_update = QPushButton("Update Orbit")
         btn_update.clicked.connect(self.update_orbit)
-        slider_widget.addWidget(btn_update)
+        self.controlsLayout.addWidget(btn_update)
 
-        self.control_panel.addLayout(slider_widget)
+        # Initialize list to keep track of satellite actors
+        btn_save_adj_matrix = QPushButton("Save Adjacency Matrix & Network Graphs for Specified Timeframe")
+        btn_save_adj_matrix.clicked.connect(self.save_adj_matrix_for_specified_timeframe)
+        self.controlsLayout.addWidget(btn_save_adj_matrix)
 
-        self.end_time_input = QLineEdit(self.end_time.strftime("%Y-%m-%d %H:%M:%S"))
-        self.control_panel.addWidget(self.end_time_input)
-        
-        self.main_layout.addLayout(self.control_panel)
-
-    def set_up_tle_display(self):
-        self.tle_display = TLEDisplay(self)
-        self.tle_display.raise_()
-
-
-    #endregion
-
-    def populate_tle_display(self):
-        self.tle_display.populate_scroll_items(self.simulation.tle_data)
-
-    #region - events
     def on_slider_change(self, value):
         #Handle time slider value changes.
         if self.start_time is not None and self.end_time is not None:
             slider_time = self.start_time + (value * self.simulation.timestep)
-            
-            positions = self.simulation.get_satellite_positions(slider_time)
-            
-        self.update_visualization(slider_time)
+            self.update_visualization(slider_time)
 
-    def on_file_dropped(self, tle_file_path):
-        tle_data = self.read_tle_file(tle_file_path)
-        self.simulation.set_tle_data(tle_data)
+    def on_update_positions(self, positions):
+        #Slot to receive updated positions from the worker thread.
+        if positions:
+            self.plot_orbits(positions)
+            self.update_positions(positions)
+            self.update_distances(positions)
+            self.update_graphs(positions)
+            self.vtkWidget.GetRenderWindow().Render()
 
-        positions = self.simulation.get_satellite_positions(self.start_time)
-
-        self.update_visualization(self.start_time)
-        self.populate_tle_display()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.overlay.update_size()
-
-    def closeEvent(self, event):
-        #Handle the close event to properly stop the worker thread.
-        if hasattr(self, 'worker') and self.worker is not None:
-            self.worker.stop()
-            self.worker.wait()
-        event.accept()
-    #endregion
-
-    #region - Visualisation
     def update_orbit(self):
         #Update the simulation parameters based on user input.
         try:
@@ -491,14 +196,11 @@ class SatSimGUI(QMainWindow):
             total_steps = int((self.end_time - self.start_time) / timedelta(minutes=timestep))
             self.time_slider.setMaximum(total_steps)
 
-            positions = self.simulation.get_satellite_positions(self.start_time)
-
-            #self.update_label(positions)
             self.update_visualization(self.start_time)
-    
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {e}")
-    
+
     def update_visualization(self, time):
         #Update the visualization for a specific time.
         positions = self.simulation.get_satellite_positions(time)
@@ -509,8 +211,11 @@ class SatSimGUI(QMainWindow):
         self.plot_orbits(positions)
         self.vtkWidget.GetRenderWindow().Render()
 
-        #TODO: reintegrate and update graph code
-        #self.update_graphs(positions)
+        self.update_positions(positions)
+        self.update_distances(positions)
+        self.update_graphs(positions)
+
+        self.position_label.setText(f"Visualization Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     def plot_orbits(self, positions):
         #Plot the satellite orbits and connections in the VTK renderer.
@@ -622,40 +327,83 @@ class SatSimGUI(QMainWindow):
         self.renderer.ResetCameraClippingRange()
         self.renderer.ResetCamera()
         self.vtkWidget.GetRenderWindow().Render()
-    #endregion
 
-    #yoinked from sat_sim_handler.
-    #TODO: figure out how to reference the method in the sat_sim_handler, to reduce duplicated code.
-    def read_tle_file(self, file_path):
-        # Reads TLE data from the specified file path.
-        tle_data = {}
+    def update_positions(self, positions):
+        #Update the position label with current satellite positions.
+        pos_text = " | ".join([f"{name}: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}) km" for name, pos in positions.items()])
+        self.position_label.setText("Current Positions: " + pos_text)
+
+    def update_distances(self, positions):
+        #Update the distance label with calculated distances between satellites.
+        distances = []
+        keys = list(positions.keys())
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                dist = self.simulation.calculate_distance(positions[keys[i]], positions[keys[j]])
+                distances.append(f"{keys[i]} to {keys[j]}: {dist:.2f} km")
+        self.distance_label.setText("Distance Calculations: " + " | ".join(distances))
+
+    def update_graphs(self, positions):
+        #Update the adjacency matrix and network graph plots.
         try:
-            with open(file_path, 'r') as f:
-                lines = [line.strip() for line in f.readlines()]
+            adj_matrix, keys = self.simulation.generate_adjacency_matrix(positions)
+            self.axes[0].cla()
+            self.axes[1].cla()
 
-            # Handle files with or without a title line (3LE or 2LE)
-            i = 0
-            while i < len(lines):
-                if lines[i].startswith('1') or lines[i].startswith('2'):
-                    # This is the 2LE format (no title line)
-                    tle_line1 = lines[i].strip()
-                    tle_line2 = lines[i + 1].strip()
-                    tle_data[f"Satellite_{i // 2 + 1}"] = [tle_line1, tle_line2]
-                    i += 2
-                else:
-                    # 3LE format (title line included)
-                    name = lines[i].strip()
-                    tle_line1 = lines[i + 1].strip()
-                    tle_line2 = lines[i + 2].strip()
-                    tle_data[name] = [tle_line1, tle_line2]
-                    i += 3
+            self.axes[0].imshow(adj_matrix, cmap='Blues', interpolation='none', aspect='equal')
+            self.axes[0].set_title('Adjacency Matrix')
+            self.axes[0].set_xticks(np.arange(len(keys)))
+            self.axes[0].set_yticks(np.arange(len(keys)))
+            self.axes[0].set_xticklabels(keys, rotation=90)
+            self.axes[0].set_yticklabels(keys)
 
-            if not tle_data:
-                return None
-            return tle_data
-        
-        except OSError:
-            raise
+            G = nx.from_numpy_array(adj_matrix)
+            pos = nx.spring_layout(G)
+            nx.draw(G, pos, ax=self.axes[1], with_labels=True, node_color='skyblue')
+            self.axes[1].set_title('Network Graph')
+
+            self.canvas.draw()
+        except ValueError as e:
+            QMessageBox.critical(self, "Error", f"An error occurred during graph update: {e}")
+
+    def save_adj_matrix_for_specified_timeframe(self):
+        #Save the adjacency matrices and network graphs to files.
+        try:
+            output_file, _ = QFileDialog.getSaveFileName(self, "Save Adjacency Matrix", "", "Text Files (*.txt);;All Files (*)")
+            pdf_file, _ = QFileDialog.getSaveFileName(self, "Save Network Graphs PDF", "", "PDF Files (*.pdf);;All Files (*)")
+
+            if output_file and pdf_file:
+                matrices = self.simulation.run_with_adj_matrix()
+                if not matrices:
+                    QMessageBox.warning(self, "No Data", "No data was generated to save.")
+                    return
+
+                with open(output_file, 'w') as f:
+                    for timestamp, matrix in matrices:
+                        formatted_timestamp = timestamp if isinstance(timestamp, str) else timestamp.utc_iso()
+                        f.write(f"Time: {formatted_timestamp}\n")
+                        np.savetxt(f, matrix, fmt='%d')
+                        f.write("\n")
+
+                with PdfPages(pdf_file) as pdf:
+                    for timestamp, matrix in matrices:
+                        formatted_timestamp = timestamp if isinstance(timestamp, str) else timestamp.utc_iso()
+                        G = nx.from_numpy_array(matrix)
+                        pos = nx.spring_layout(G)
+                        plt.figure()
+                        nx.draw(G, pos, with_labels=True, node_color='skyblue')
+                        plt.title(f"Network Graph at {formatted_timestamp}")
+                        pdf.savefig()
+                        plt.close()
+
+                QMessageBox.information(self, "Success", "Adjacency matrix and network graphs saved successfully!")
+
         except Exception as e:
-            print(f"Error reading TLE file at {file_path}: {e}")
-            raise ValueError("Error reading TLE file.")
+            QMessageBox.critical(self, "Error", f"An error occurred while saving the matrix: {e}")
+
+    def closeEvent(self, event):
+        #Handle the close event to properly stop the worker thread.
+        if hasattr(self, 'worker') and self.worker is not None:
+            self.worker.stop()
+            self.worker.wait()
+        event.accept()
