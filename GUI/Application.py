@@ -557,7 +557,6 @@ class Backend():
     def add(self, name, line_1, line_2):
         self.tle_dict[name] = [line_1, line_2]
         self.tle_status[name] = True
-        print(f"Added {self.tle_dict[name]}")
 
     def delete(self, element_name):
         del self.tle_dict[element_name]
