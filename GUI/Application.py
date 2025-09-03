@@ -35,11 +35,13 @@ class MainWindow(QMainWindow):
         #Initialize window and place OpengGL inside 
         self.setWindowTitle("S.P.A.C.E")
         self.setGeometry(100, 100, 640, 480)
-        self.setCentralWidget(TimeGlobeWidget())
+
+        self.set_up_backend()
+
+        self.setCentralWidget(TimeGlobeWidget(self.backend))
         # self.sphere = Sphere(self) 
         # self.setCentralWidget(self.sphere)
         
-        self.set_up_backend()
         self.set_up_tle_display()
         
         #self.set_up_graph_display()
@@ -182,8 +184,10 @@ class MainWindow(QMainWindow):
 #  2) Time + UI Builder
 # ————————————————————————————————
 class TimeGlobeWidget(QWidget):
-    def __init__(self):
+    def __init__(self, backend):
         super().__init__()
+
+        self.backend = backend
 
         # Time Widget
         self.time = QTime.currentTime()
@@ -203,7 +207,7 @@ class TimeGlobeWidget(QWidget):
 
     def buildUI(self):
 
-        self.sphere = Sphere()
+        self.sphere = Sphere(self.backend)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setAccessibleName("slider_Time")
 
@@ -265,120 +269,116 @@ class TimeGlobeWidget(QWidget):
 #  3) Satellites
 # ————————————————————————————————
 
-class Satellites(QOpenGLWidget):
-    #Bugs in this class:
-    #1. Orbit doesn't align with the satellites. I've tried to make it work, but it doesn't.
-    #2. Some satellites in the SATTLE.txt have positions that are 40,000,000km from earth, which don't make sense.
-    #3. Time hasn't been included in this yet
-    #
-    #
-    def __init__(self):
+from skyfield.constants import ERAD
+
+class Satellite():
+    #A class to hold all information relating to a satellite to not overcrowd a dictionary
+    def __init__(self, satellite):
+        self.satellite = satellite
+        self.positions = self.PopulateSatellitePositions()
+        self.show = True #When needed its here
+
+        #Constants
+        self.color = self.Color()
+        self.sphereRadius = 0.03
+
+    def Color(self): #Temp Color for differentiation, will change to label instead and also be able to show or hide label
+        tempColor = hash(self.satellite.model.satnum)
+        return (tempColor%253/255, tempColor%254/255, tempColor%255/255)
+
+    def PopulateSatellitePositions(self):
+        year = self.satellite.model.epochyr
+        day, month = divmod(self.satellite.model.epochdays, 12) #Split the days of epoch day into months and days in month
+        revolutionsPerDay = self.satellite.model.no_kozai * 229.1831 #MinutesInADay/2Pi
+        
+        orbitalPeriod = 1 / (revolutionsPerDay - 1) #-1 to make orbits overlap slightly so other orbits can close
+
+        orbitResolution = 1000 #How smooth the orbit is
+
+        ts = load.timescale()
+        times = ts.utc(year, month, np.linspace(day, day+orbitalPeriod, orbitResolution))
+
+        positions = []
+        for t in times:
+            geocentric = self.satellite.at(t)
+            x,y,z = (pos/(ERAD/1000) for pos in geocentric.position.km)
+            positions.append((x,y,z))
+
+        return positions
+
+    def DrawLabel(self, quadric):
+        if not self.show: return
+        pass
+
+    def DrawSatellite(self, quadric, position=0):
+        if not self.show: return
+        x,y,z = self.positions[position%len(self.positions)]
+        glColor3f(*self.color)
+        glPushMatrix()
+        glTranslate(x,y,z)
+        gluSphere(quadric, self.sphereRadius, 40, 40)
+        glPopMatrix()
+
+    def DrawOrbit(self):
+        if not self.show: return
+        glColor3f(*self.color)
+        glLineWidth(2)
+        glBegin(GL_LINE_STRIP)
+        for x,y,z in self.positions:
+            glVertex3f(x,y,z)
+        glEnd()
+
+class Satellites(QOpenGLWidget):#Technically not needed, just here to show the satellites and their orbits, otherwise a list of Satellite objects would do
+    def __init__(self, backend, parent=None):
+        super().__init__(parent)
+        
+        self.backend = backend
+        self.backend.subscribe(self.update_satellites)
+
         self.satellites = {}
-        self.read_file()
-        #self.get_data_from_overlay()
-        self.time = 0
+        self.update_satellites()
+        
+        self.quadric = gluNewQuadric()
         self.position = 0
-        self.quadric = None
         
     def Quadric(self, quad=None):
-        if quad != None:
+        if quad:
             self.quadric = quad
         else:
             return self.quadric
+
+    #If sticking with the read_tle_file function from the sat_sim_handler, then this code works, otherwise use other read_file function
+    def update_satellites(self):
         
-    #Temp function just for visual. Need to update this gui to get one main loop
-    def read_file(self):
-        input_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), r"TLEs/SATTLE.txt")
-        satellites = load.tle_file(input_file)
-        if not satellites:
-            print("No TLE Data Found")
+        tle_data = self.backend.get_data_from_enabled_tle_slots()
+
+        if not tle_data:
+            print("Null passed")
             return
-    
-        satDict = {}
-        for sat in satellites:
-            satnum = sat.model.satnum
-            if satnum != 19274 and satnum != 7924: continue
-            if satnum not in satDict.keys():
-                satDict[satnum] = []
-            #Restricts Dictionary to 10 Positions, best to remove in the future
-            if len(satDict[satnum]) > 10:
-                continue
-            satDict[satnum].append(sat)
-       
-        self.satellites = satDict
         
-    def SatDraw(self):
-        self.DrawSatellites()
-        self.DrawOrbits()
-        
-    def tempColor(self, satnum):
-        #Color to differentiate satellites
-        r = (satnum // 10000)/100
-        g = ((satnum // 100) % 100)/100
-        b = (satnum % 100)/100
-        glColor3f(r,g,b)
-        
-    def getXYZ(self, position):
-        geocentric = position.at(load.timescale().utc(self.time)).position.km
-        x,y,z = (pos/EARTH_RADIUS for pos in geocentric)
-        return x,y,z
-            
-    def DrawSatellites(self, sphere_radius=0.05):
-        for satnum,positions in self.satellites.items():
-            x,y,z = self.getXYZ(positions[self.position])
-            self.tempColor(satnum)
-            glPushMatrix()
-            glTranslatef(x,y,z)
-            gluSphere(self.quadric, sphere_radius, 40, 40)
-            glPopMatrix()
-            
-    def CalculateOrbit(self, p1, p2):
-        #Doesn't work :(
-        def normalize(v):
-            norm = np.linalg.norm(v)
-            return v / norm if norm != 0 else v
-        p1 = np.array(p1, dtype=np.float64)
-        p2 = np.array(p2, dtype=np.float64)
+        for i in tle_data:
+            name = str(i)
+            line_1 = tle_data[name][0]
+            line_2 = tle_data[name][1]
 
-        center = (p1 + p2) / 2
-        vec = p2 - p1
+            satellite = EarthSatellite(line_1, line_2, name, None)
+            self.satellites[name] = Satellite(satellite)
 
-        # Find normal of the disk plane
-        arbitrary = np.array([1, 0, 0]) if abs(vec[0]) < 0.9 else np.array([0, 1, 0])
-        tangent = normalize(np.cross(vec, arbitrary))
-        normal = normalize(np.cross(vec, tangent))
-
-        # Compute rotation from [0,0,1] (XY disk normal) to this normal
-        from_vec = np.array([0, 0, 1])
-        to_vec = normal
-        axis = normalize(np.cross(from_vec, to_vec))
-        dot = np.clip(np.dot(from_vec, to_vec), -1.0, 1.0)
-        angle = np.degrees(np.arccos(dot))
-
-        if np.linalg.norm(axis) < 1e-6:
-            axis = np.array([1, 0, 0])  # arbitrary axis if vectors are parallel or anti-parallel
-
-        radius = np.linalg.norm(vec) / 2
-
-        return center, normal, axis, angle, radius
-
-    def DrawOrbits(self):
-        for satnum,positions in self.satellites.items():
-            center, normal, axis, angle, radius = self.CalculateOrbit(self.getXYZ(positions[self.position]), self.getXYZ(positions[self.position+1]))
-            self.tempColor(satnum)
-            glPushMatrix()
-            glRotatef(angle*180/math.pi, *axis)
-            glRotatef(angle*180/math.pi, *normal)
-            gluDisk(self.quadric, 1.28, 1.3, 40, 1)
-            glPopMatrix()
+    def Draw(self):
+        for satellite in self.satellites.values():
+            satellite.DrawSatellite(self.quadric, self.position)
+            satellite.DrawOrbit()
 
 # ————————————————————————————————
 #  3) Earth
 # ————————————————————————————————
 
 class  Sphere(QOpenGLWidget):
-    def __init__(self, parent=None):
+    def __init__(self, backend, parent=None):
         super().__init__(parent)
+
+        self.backend = backend
+
         self.xRot = 0.0
         self.yRot = 90.0  # Start with prime meridian facing front
         self.zRot = 0.0
@@ -386,7 +386,7 @@ class  Sphere(QOpenGLWidget):
         self.textureID = 0
         
         
-        self.satellites = Satellites()
+        self.satellites = Satellites(self.backend)
 
     def initializeGL(self):
         self.quadric = gluNewQuadric()
@@ -450,7 +450,7 @@ class  Sphere(QOpenGLWidget):
         glEnd()
 
     def paintGL(self):
-        self.satellites.SatDraw()
+        self.satellites.Draw()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
 
@@ -501,9 +501,12 @@ from workflows import flomps
 import json
 
 class Backend():
+
     def __init__(self):
         print("Backend - Init Started")
-        
+
+        self._subscribers = []
+
         self.tle_dict = {}
         self.tle_status = {}
 
@@ -532,10 +535,13 @@ class Backend():
         return config_file
     
     def get_data_from_enabled_tle_slots(self):
-        return_dict = {}
+        return_dict = None
 
         for i in self.tle_dict:
             if(self.tle_status[i]):
+                if return_dict is None:
+                    return_dict = {}
+
                 name = str(i)
                 line_1 = self.tle_dict[name][0]
                 line_2 = self.tle_dict[name][1]
@@ -553,6 +559,8 @@ class Backend():
             line_2 = tle_data[name][1]
 
             self.add(name, line_1, line_2)
+
+        self._notify()
         
     def add(self, name, line_1, line_2):
         self.tle_dict[name] = [line_1, line_2]
@@ -561,11 +569,20 @@ class Backend():
     def delete(self, element_name):
         del self.tle_dict[element_name]
         del self.tle_status[element_name]
+
+        self._notify()
     
     def set_element_state(self, element_name, element_state):
         self.tle_status[element_name] =  element_state
 
+    def subscribe(self, callback):
+        """Register a function to be called on update."""
+        self._subscribers.append(callback)
 
+    def _notify(self):
+        """Call all subscribed functions."""
+        for callback in self._subscribers:
+            callback()
 #endregion
 
 
